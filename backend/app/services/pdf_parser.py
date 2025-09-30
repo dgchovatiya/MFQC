@@ -58,6 +58,9 @@ class TravelerPDFParser:
             "board_serials": [],
             "part_numbers": [],
             "seq_20_data": {},
+            "raw_text": "",
+            "page_texts": [],
+            "pdf_info": {},
             "parsing_status": "pending",
             "errors": []
         }
@@ -69,11 +72,60 @@ class TravelerPDFParser:
             
             self.logger.info(f"Starting PDF parsing for: {pdf_path}")
             
-            # TODO: Implement actual PDF parsing logic in next substeps
-            # For now, return basic structure
-            result["parsing_status"] = "success"
-            
-            self.logger.info("PDF parsing completed successfully")
+            # Open PDF file with pdfplumber
+            with pdfplumber.open(pdf_path) as pdf:
+                # Extract basic PDF information
+                pdf_info = {
+                    "total_pages": len(pdf.pages),
+                    "metadata": pdf.metadata if pdf.metadata else {}
+                }
+                
+                # Extract text from all pages
+                all_text = ""
+                page_texts = []
+                
+                for page_num, page in enumerate(pdf.pages, 1):
+                    try:
+                        # Extract text from current page
+                        page_text = page.extract_text()
+                        
+                        if page_text:
+                            page_texts.append({
+                                "page_number": page_num,
+                                "text": page_text.strip(),
+                                "char_count": len(page_text.strip())
+                            })
+                            
+                            # Add to combined text with page separator
+                            all_text += f"\n--- PAGE {page_num} ---\n"
+                            all_text += page_text.strip()
+                            all_text += "\n"
+                        else:
+                            self.logger.warning(f"No text found on page {page_num}")
+                            
+                    except Exception as page_error:
+                        error_msg = f"Error extracting text from page {page_num}: {str(page_error)}"
+                        self.logger.warning(error_msg)
+                        result["errors"].append(error_msg)
+                
+                # Store extracted text data
+                result["raw_text"] = all_text.strip()
+                result["page_texts"] = page_texts
+                result["pdf_info"] = pdf_info
+                
+                # Basic validation of extracted content
+                if not all_text.strip():
+                    raise Exception("No text could be extracted from PDF - file may be image-based or corrupted")
+                
+                if len(page_texts) == 0:
+                    raise Exception("No readable pages found in PDF")
+                
+                # Log extraction statistics
+                total_chars = sum(page["char_count"] for page in page_texts)
+                self.logger.info(f"PDF text extraction completed: {len(page_texts)} pages, {total_chars} characters")
+                
+                result["parsing_status"] = "success"
+                
             return result
             
         except FileNotFoundError as e:
@@ -83,8 +135,26 @@ class TravelerPDFParser:
             result["errors"].append(f"File error: {error_msg}")
             return result
             
+        except PermissionError as e:
+            error_msg = f"Permission denied accessing PDF file: {str(e)}"
+            self.logger.error(error_msg)
+            result["parsing_status"] = "failed"
+            result["errors"].append(f"Permission error: {error_msg}")
+            return result
+            
         except Exception as e:
-            error_msg = f"PDF parsing failed: {str(e)}"
+            # Handle common PDF-specific errors
+            error_str = str(e).lower()
+            
+            if "password" in error_str or "encrypted" in error_str:
+                error_msg = "PDF is password-protected or encrypted - cannot extract text"
+            elif "corrupted" in error_str or "damaged" in error_str:
+                error_msg = "PDF file appears to be corrupted or damaged"
+            elif "not a pdf" in error_str:
+                error_msg = "File is not a valid PDF format"
+            else:
+                error_msg = f"PDF parsing failed: {str(e)}"
+                
             self.logger.error(error_msg)
             result["parsing_status"] = "failed" 
             result["errors"].append(error_msg)
@@ -109,6 +179,36 @@ class TravelerPDFParser:
         """Extract part numbers with revisions (placeholder for substep 3)"""
         # TODO: Implement part number extraction logic  
         return []
+    
+    def get_text_summary(self, parsing_result: Dict[str, Any]) -> str:
+        """
+        Get a summary of extracted text for debugging and logging
+        
+        Args:
+            parsing_result: Result from parse_traveler_pdf()
+            
+        Returns:
+            str: Human-readable summary of extracted text
+        """
+        if parsing_result["parsing_status"] != "success":
+            return f"Parsing failed: {', '.join(parsing_result['errors'])}"
+        
+        page_count = len(parsing_result["page_texts"])
+        total_chars = sum(page.get("char_count", 0) for page in parsing_result["page_texts"])
+        
+        summary = f"PDF Summary: {page_count} pages, {total_chars} total characters"
+        
+        if parsing_result["pdf_info"]:
+            pdf_info = parsing_result["pdf_info"]
+            if "total_pages" in pdf_info:
+                summary += f", {pdf_info['total_pages']} PDF pages"
+        
+        # Add preview of first 200 characters
+        if parsing_result["raw_text"]:
+            preview = parsing_result["raw_text"][:200].replace('\n', ' ').strip()
+            summary += f"\nText preview: {preview}..."
+        
+        return summary
 
 # Create singleton instance for service
 pdf_parser_service = TravelerPDFParser()
