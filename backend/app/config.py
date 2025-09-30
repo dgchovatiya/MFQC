@@ -1,6 +1,6 @@
 # app/config.py
 from pydantic_settings import BaseSettings
-from typing import List
+from typing import List, Optional
 
 class Settings(BaseSettings):
     """Application configuration using Pydantic settings"""
@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     
     # File Upload
     UPLOAD_DIR: str = "./uploads"
-    MAX_UPLOAD_SIZE: int = 10 * 1024 * 1024  # 10 MB
+    MAX_UPLOAD_SIZE: int = 50 * 1024 * 1024  # 10 MB
     ALLOWED_EXTENSIONS: dict = {
         "traveler": [".pdf"],
         "image": [".jpg", ".jpeg", ".png"],
@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     ]
     
     # OCR Settings
-    TESSERACT_CMD: str = None  # Auto-detect, or set path if needed
+    TESSERACT_CMD: Optional[str] = None  # Auto-detect, or set path if needed
     OCR_LANGUAGE: str = "eng"
     
     # Validation Settings
