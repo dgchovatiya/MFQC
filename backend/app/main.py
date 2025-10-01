@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
 from .database import init_db
+from .logging_config import setup_logging
 import os
 
 # Create FastAPI app
@@ -77,20 +78,25 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup_event():
     """Initialize database and create upload directory"""
-    print(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
+    # Setup logging first (creates log files)
+    logger = setup_logging()
+    logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
     
     # Create uploads directory if not exists
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
+    logger.info(f"Upload directory: {settings.UPLOAD_DIR}")
     
     # Initialize database
     init_db()
-    print("Database initialized")
+    logger.info("Database initialized successfully")
 
 # Shutdown event
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown"""
-    print("Shutting down...")
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info("Shutting down Manufacturing QC System...")
 
 # Health check endpoint
 @app.get("/health", tags=["system"])
