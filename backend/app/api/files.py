@@ -176,6 +176,10 @@ async def upload_file(
     db.commit()
     db.refresh(uploaded_file)
     
+    # Files are just saved to disk - no processing until analysis is triggered
+    # All processing (PDF parsing, OCR, Excel parsing) happens in the validation pipeline
+    # when user clicks "Start Analysis"
+    
     return uploaded_file
 
 @router.get("/{session_id}/files", response_model=List[FileResponse])
