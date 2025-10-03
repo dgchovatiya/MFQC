@@ -7,6 +7,7 @@ from ..models.file import UploadedFile, FileType, ProcessingStatus
 from ..schemas.session import SessionResponse
 from ..services.pdf_parser import pdf_parser_service
 from ..services.ocr_service import ocr_service
+from ..services.excel_parser import excel_parser
 from ..logging_config import setup_logging
 from datetime import datetime
 
@@ -215,12 +216,53 @@ def run_validation_pipeline(session_id: str, db: Session):
         # =============================================================================
         # PHASE 7: PROCESS EXCEL BOM FILES - PLACEHOLDER  
         # =============================================================================
-        bom_data = []
-        for bom_file in bom_files:
-            logger.info(f"Phase 7: Excel BOM parsing for {bom_file.filename} - TODO")
-            # TODO: Implement Excel parsing in Phase 7
-            bom_file.processing_status = ProcessingStatus.PENDING  # Will be COMPLETED in Phase 7
-            # TODO: Extract job numbers, part numbers, revisions from Excel
+        # Phase 7: Excel BOM Parsing (Step 1: Basic file reading)
+        # =============================================================================
+        logger.info("Phase 7: Excel BOM parsing - Starting...")
+        # Note: bom_files already defined earlier in the function
+        
+        if not bom_files:
+            logger.warning("Phase 7: No BOM files uploaded")
+        else:
+            for bom_file in bom_files:
+                logger.info(f"Phase 7: Processing {bom_file.filename}")
+                
+                try:
+                    # Update status to processing
+                    bom_file.processing_status = ProcessingStatus.PROCESSING
+                    db.commit()
+                    
+                    # Parse Excel file (Step 1: Basic reading)
+                    bom_result = excel_parser.parse_bom(bom_file.storage_path)
+                    
+                    # Store extracted data
+                    bom_file.extracted_data = bom_result
+                    
+                    # Update status based on result
+                    if bom_result.get("status") == "success":
+                        bom_file.processing_status = ProcessingStatus.COMPLETED
+                        bom_file.processed_at = datetime.utcnow()
+                        logger.info(f"Phase 7: Successfully read {bom_file.filename} - "
+                                   f"{bom_result.get('total_rows', 0)} rows")
+                    else:
+                        bom_file.processing_status = ProcessingStatus.FAILED
+                        logger.error(f"Phase 7: Failed to read {bom_file.filename}: "
+                                   f"{bom_result.get('error', 'Unknown error')}")
+                    
+                    db.commit()
+                    
+                except Exception as e:
+                    logger.error(f"Phase 7: Error processing {bom_file.filename}: {e}")
+                    bom_file.processing_status = ProcessingStatus.FAILED
+                    bom_file.extracted_data = {
+                        "file_name": bom_file.filename,
+                        "status": "error",
+                        "error": str(e)
+                    }
+                    db.commit()
+            
+            logger.info(f"Phase 7: Excel BOM parsing complete - "
+                       f"{len(bom_files)} files processed")
         
         # =============================================================================
         # PHASE 8: DATA NORMALIZATION - PLACEHOLDER
