@@ -11,12 +11,32 @@ from ..services.ocr_service import ocr_service
 from ..services.excel_parser import excel_parser, bom_aggregator
 from ..services.normalizer import data_normalizer
 from ..services.validation_engine import validation_engine
+from ..services.progress_tracker import progress_tracker
+from ..websocket.manager import connection_manager
 from ..logging_config import setup_logging
 from datetime import datetime
+import asyncio
 
 logger = setup_logging()
 
 router = APIRouter()
+
+# Helper function to broadcast progress updates
+async def broadcast_progress(session_id: str, phase: str, message: str, progress: int, status: str = "processing", details: dict = None):
+    """Helper to broadcast progress to WebSocket clients"""
+    try:
+        await progress_tracker.update(session_id, phase, message, progress, status, details)
+        await connection_manager.send_to_session(session_id, {
+            "session_id": session_id,
+            "phase": phase,
+            "message": message,
+            "progress": progress,
+            "status": status,
+            "timestamp": datetime.utcnow().isoformat(),
+            "details": details or {}
+        })
+    except Exception as e:
+        logger.error(f"Error broadcasting progress: {e}")
 
 @router.post("/{session_id}/analyze", response_model=SessionResponse, status_code=202)
 def start_analysis(
@@ -84,12 +104,12 @@ def start_analysis(
     db.commit()
     
     # Add background task for validation pipeline
-    background_tasks.add_task(run_validation_pipeline, session_id, db)
+    background_tasks.add_task(lambda: asyncio.run(run_validation_pipeline(session_id, db)))
     
     return session
 
 
-def run_validation_pipeline(session_id: str, db: Session):
+async def run_validation_pipeline(session_id: str, db: Session):
     """
     Background task to run the complete validation pipeline
     
@@ -99,9 +119,12 @@ def run_validation_pipeline(session_id: str, db: Session):
     3. Parse Excel BOM files (Phase 7)
     4. Normalize data (Phase 8)
     5. Run 7 validation checks (Phase 9)
+    
+    Broadcasts real-time progress updates via WebSocket
     """
     
     try:
+        await broadcast_progress(session_id, "Initialization", "Starting validation pipeline...", 0, "processing")
         logger.info(f"Starting validation pipeline for session {session_id}")
         
         # Get session and files
@@ -120,6 +143,7 @@ def run_validation_pipeline(session_id: str, db: Session):
         # =============================================================================
         # PHASE 5: PROCESS PDF TRAVELER DOCUMENTS  
         # =============================================================================
+        await broadcast_progress(session_id, "Phase 1-5: PDF Parsing", f"Processing Traveler PDF...", 10, "processing")
         traveler_data = {}
         if traveler_file:
             logger.info(f"Processing Traveler PDF: {traveler_file.filename}")
@@ -139,6 +163,7 @@ def run_validation_pipeline(session_id: str, db: Session):
                 # Update processing status based on result
                 if parsing_result.get("parsing_status") == "success":
                     traveler_file.processing_status = ProcessingStatus.COMPLETED
+                    await broadcast_progress(session_id, "Phase 1-5: PDF Parsing", "PDF processing complete", 20, "processing")
                     logger.info(f"Successfully processed {traveler_file.filename}")
                     
                     # Log extracted manufacturing data
@@ -182,6 +207,7 @@ def run_validation_pipeline(session_id: str, db: Session):
         # =============================================================================
         # PHASE 6: PROCESS PRODUCT IMAGES (OCR)
         # =============================================================================
+        await broadcast_progress(session_id, "Phase 6: Image OCR", "Starting image analysis...", 30, "processing")
         image_data_list = []
         for image_file in image_files:
             logger.info(f"Phase 6: Starting OCR processing for {image_file.filename}")
@@ -195,6 +221,7 @@ def run_validation_pipeline(session_id: str, db: Session):
 
                 if ocr_result.get("validation", {}).get("completeness_score", 0) > 0:
                     image_file.processing_status = ProcessingStatus.COMPLETED
+                    await broadcast_progress(session_id, "Phase 6: Image OCR", "Image processing complete", 45, "processing")
                     logger.info(f"Successfully processed image {image_file.filename}")
                     score = ocr_result["validation"]["completeness_score"]
                     logger.info(f"  - OCR Completeness Score: {score}%")
@@ -219,6 +246,7 @@ def run_validation_pipeline(session_id: str, db: Session):
         # =============================================================================
         # PHASE 7: PROCESS EXCEL BOM FILES
         # =============================================================================
+        await broadcast_progress(session_id, "Phase 7: Excel BOM Parsing", "Processing BOM files...", 55, "processing")
         logger.info("Phase 7: Excel BOM parsing - Starting...")
         
         # Clear aggregator for fresh start
@@ -282,6 +310,7 @@ def run_validation_pipeline(session_id: str, db: Session):
         # =============================================================================
         # PHASE 8: DATA NORMALIZATION
         # =============================================================================
+        await broadcast_progress(session_id, "Phase 8: Data Normalization", "Normalizing extracted data...", 70, "processing")
         logger.info("Phase 8: Data normalization - Starting...")
         
         normalized_data = {
@@ -350,6 +379,7 @@ def run_validation_pipeline(session_id: str, db: Session):
         # =============================================================================
         # PHASE 9: 7-CHECK VALIDATION ENGINE
         # =============================================================================
+        await broadcast_progress(session_id, "Phase 9: Validation", "Running 7-check validation...", 85, "processing")
         logger.info("Phase 9: 7-check validation engine - Starting...")
         
         # Prepare files info for validation
@@ -406,11 +436,31 @@ def run_validation_pipeline(session_id: str, db: Session):
         
         db.commit()
         
+        # Send completion notification
+        await broadcast_progress(
+            session_id, 
+            "Complete", 
+            f"Validation complete - Status: {session.overall_result.value}",
+            100, 
+            "completed",
+            {"overall_status": session.overall_result.value}
+        )
+        
         logger.info(f"Validation pipeline completed successfully for session {session_id}")
         
     except Exception as e:
         # Handle pipeline errors
         logger.exception(f"Pipeline failed for session {session_id}: {str(e)}")
+        
+        # Send error notification
+        await broadcast_progress(
+            session_id,
+            "Error",
+            f"Pipeline failed: {str(e)[:100]}",
+            0,
+            "failed",
+            {"error": str(e)}
+        )
         
         try:
             if session:

@@ -59,6 +59,10 @@ app = FastAPI(
             "description": "Validation results - Retrieve analysis outcomes and evidence"
         },
         {
+            "name": "websocket",
+            "description": "Real-time updates - WebSocket connections for progress monitoring"
+        },
+        {
             "name": "system",
             "description": "System endpoints - Health checks and API information"
         }
@@ -140,9 +144,10 @@ async def root():
     }
 
 # Include API routers
-from .api import sessions, files, analysis, results
+from .api import sessions, files, analysis, results, websocket
 
 app.include_router(sessions.router, prefix="/api/sessions", tags=["sessions"])
 app.include_router(files.router, prefix="/api/sessions", tags=["files"])
 app.include_router(analysis.router, prefix="/api/sessions", tags=["analysis"])
 app.include_router(results.router, prefix="/api/sessions", tags=["results"])
+app.include_router(websocket.router, prefix="/api/ws", tags=["websocket"])
