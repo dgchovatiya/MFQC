@@ -7,7 +7,7 @@ from ..models.file import UploadedFile, FileType, ProcessingStatus
 from ..schemas.session import SessionResponse
 from ..services.pdf_parser import pdf_parser_service
 from ..services.ocr_service import ocr_service
-from ..services.excel_parser import excel_parser
+from ..services.excel_parser import excel_parser, bom_aggregator
 from ..logging_config import setup_logging
 from datetime import datetime
 
@@ -214,12 +214,12 @@ def run_validation_pipeline(session_id: str, db: Session):
                 logger.exception(f"Exception during OCR processing for {image_file.filename}")
 
         # =============================================================================
-        # PHASE 7: PROCESS EXCEL BOM FILES - PLACEHOLDER  
-        # =============================================================================
-        # Phase 7: Excel BOM Parsing (Step 1: Basic file reading)
+        # PHASE 7: PROCESS EXCEL BOM FILES
         # =============================================================================
         logger.info("Phase 7: Excel BOM parsing - Starting...")
-        # Note: bom_files already defined earlier in the function
+        
+        # Clear aggregator for fresh start
+        bom_aggregator.clear()
         
         if not bom_files:
             logger.warning("Phase 7: No BOM files uploaded")
@@ -228,25 +228,26 @@ def run_validation_pipeline(session_id: str, db: Session):
                 logger.info(f"Phase 7: Processing {bom_file.filename}")
                 
                 try:
-                    # Update status to processing
                     bom_file.processing_status = ProcessingStatus.PROCESSING
                     db.commit()
                     
-                    # Parse Excel file (Step 1: Basic reading)
+                    # Parse Excel file (Steps 1-5: Header detection, job extraction, parts extraction)
                     bom_result = excel_parser.parse_bom(bom_file.storage_path)
                     
                     # Store extracted data
                     bom_file.extracted_data = bom_result
                     
-                    # Update status based on result
+                    # Add to aggregator for cross-validation (Step 6)
                     if bom_result.get("status") == "success":
+                        bom_aggregator.add_bom(bom_result)
                         bom_file.processing_status = ProcessingStatus.COMPLETED
                         bom_file.processed_at = datetime.utcnow()
-                        logger.info(f"Phase 7: Successfully read {bom_file.filename} - "
-                                   f"{bom_result.get('total_rows', 0)} rows")
+                        logger.info(f"Phase 7: Successfully parsed {bom_file.filename} - "
+                                   f"Job: {bom_result.get('job_number')}, "
+                                   f"Parts: {len(bom_result.get('parts', []))}")
                     else:
                         bom_file.processing_status = ProcessingStatus.FAILED
-                        logger.error(f"Phase 7: Failed to read {bom_file.filename}: "
+                        logger.error(f"Phase 7: Failed to parse {bom_file.filename}: "
                                    f"{bom_result.get('error', 'Unknown error')}")
                     
                     db.commit()
@@ -261,8 +262,19 @@ def run_validation_pipeline(session_id: str, db: Session):
                     }
                     db.commit()
             
+            # Log aggregated summary (Step 6)
+            bom_summary = bom_aggregator.get_summary()
             logger.info(f"Phase 7: Excel BOM parsing complete - "
-                       f"{len(bom_files)} files processed")
+                       f"{bom_summary['total_bom_files']} files, "
+                       f"{bom_summary['total_jobs']} jobs, "
+                       f"{bom_summary['total_unique_parts']} unique parts")
+            logger.info(f"Phase 7: Jobs found: {bom_summary['jobs']}")
+            logger.info(f"Phase 7: Parts found: {bom_summary['parts']}")
+            
+            # Store aggregated data in session metadata for validation engine
+            if session.overall_result is None:
+                session.overall_result = {}
+            session.overall_result["bom_summary"] = bom_summary
         
         # =============================================================================
         # PHASE 8: DATA NORMALIZATION - PLACEHOLDER
