@@ -84,8 +84,17 @@ async def startup_event():
     
     # Create uploads directory if not exists
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
-    logger.info(f"Upload directory: {settings.UPLOAD_DIR}")
     
+    # Create data directory for SQLite DB if it doesn't exist
+    if "sqlite" in settings.DATABASE_URL:
+        # Assumes DATABASE_URL is like "sqlite:///./data/qc_system.db"
+        # and the app is run from the directory where "data" should be
+        db_path = settings.DATABASE_URL.split("///")[1]
+        db_dir = os.path.dirname(db_path)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+            logger.info(f"Data directory for SQLite DB created/ensured: {db_dir}")
+
     # Initialize database
     init_db()
     logger.info("Database initialized successfully")

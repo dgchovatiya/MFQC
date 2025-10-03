@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/uploads:/app/uploads
+      - ./backend/data:/app/data
+      - ./backend/logs:/app/logs
+    container_name: mf_qc_backend
+
+  # Frontend service will be added here in the future
+  # frontend:
+  #   build:
+  #     context: ./frontend
+  #     dockerfile: Dockerfile
+  #   ports:
+  #     - "3000:3000"
+  #   depends_on:
+  #     - backend
+  #   container_name: mf_qc_frontend
+
+networks:
+  default:
+    name: mf_qc_network

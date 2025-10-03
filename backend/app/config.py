@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     DEBUG: bool = True
     
     # Database
-    DATABASE_URL: str = "sqlite:///./qc_system.db"
+    DATABASE_URL: str = "sqlite:///./data/qc_system.db"
     
     # File Upload
     UPLOAD_DIR: str = "./uploads"
@@ -36,7 +36,6 @@ class Settings(BaseSettings):
     ENABLE_STRICT_VALIDATION: bool = False  # If True, treat warnings as fails
     
     class Config:
-        env_file = ".env"
         case_sensitive = True
 
 # Singleton instance
