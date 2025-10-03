@@ -6,10 +6,11 @@ from ..models.session import Session as SessionModel, SessionStatus
 from ..models.file import UploadedFile, FileType, ProcessingStatus
 from ..schemas.session import SessionResponse
 from ..services.pdf_parser import pdf_parser_service
-from ..logging_config import get_logger
+from ..services.ocr_service import ocr_service
+from ..logging_config import setup_logging
 from datetime import datetime
 
-logger = get_logger(__name__)
+logger = setup_logging()
 
 router = APIRouter()
 
@@ -175,15 +176,42 @@ def run_validation_pipeline(session_id: str, db: Session):
                 logger.exception(f"Exception processing {traveler_file.filename}: {e}")
         
         # =============================================================================
-        # PHASE 6: PROCESS PRODUCT IMAGES (OCR) - PLACEHOLDER
+        # PHASE 6: PROCESS PRODUCT IMAGES (OCR)
         # =============================================================================
-        image_data = []
+        image_data_list = []
         for image_file in image_files:
-            logger.info(f"Phase 6: OCR processing for {image_file.filename} - TODO")
-            # TODO: Implement OCR processing in Phase 6
-            image_file.processing_status = ProcessingStatus.PENDING  # Will be COMPLETED in Phase 6
-            # TODO: Extract board serials, part numbers, flight status from images
-        
+            logger.info(f"Phase 6: Starting OCR processing for {image_file.filename}")
+            try:
+                image_file.processing_status = ProcessingStatus.PROCESSING
+                db.commit()
+
+                ocr_result = ocr_service.process_image(image_file.storage_path)
+                image_file.extracted_data = ocr_result
+                image_data_list.append(ocr_result)
+
+                if ocr_result.get("validation", {}).get("completeness_score", 0) > 0:
+                    image_file.processing_status = ProcessingStatus.COMPLETED
+                    logger.info(f"Successfully processed image {image_file.filename}")
+                    score = ocr_result["validation"]["completeness_score"]
+                    logger.info(f"  - OCR Completeness Score: {score}%")
+                    warnings = ocr_result.get("validation", {}).get("validation_warnings", [])
+                    if warnings:
+                        logger.warning(f"  - OCR found {len(warnings)} potential issues:")
+                        for warning in warnings:
+                            logger.warning(f"    - {warning}")
+                else:
+                    image_file.processing_status = ProcessingStatus.FAILED
+                    logger.error(f"Failed to extract any data from {image_file.filename}")
+
+                db.commit()
+
+            except Exception as e:
+                error_msg = f"OCR processing failed unexpectedly: {str(e)}"
+                image_file.processing_status = ProcessingStatus.FAILED
+                image_file.extracted_data = {"errors": [error_msg]}
+                db.commit()
+                logger.exception(f"Exception during OCR processing for {image_file.filename}")
+
         # =============================================================================
         # PHASE 7: PROCESS EXCEL BOM FILES - PLACEHOLDER  
         # =============================================================================
@@ -240,4 +268,37 @@ def get_analysis_status(
     if not session:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
     
+    return session
+
+
+@router.post("/{session_id}/reset-status", response_model=SessionResponse, status_code=200)
+def reset_analysis_status(
+    session_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Reset analysis state so a session can be processed again.
+    """
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+
+    if session.status == SessionStatus.PROCESSING:
+        raise HTTPException(status_code=409, detail="Cannot reset while analysis is in progress")
+
+    logger.info(f"Resetting analysis status for session {session_id}")
+
+    session.status = SessionStatus.PENDING
+    session.overall_result = None
+    session.updated_at = datetime.utcnow()
+
+    files = db.query(UploadedFile).filter(UploadedFile.session_id == session_id).all()
+    for file_record in files:
+        file_record.processing_status = ProcessingStatus.PENDING
+        file_record.processed_at = None
+        file_record.extracted_data = None
+
+    db.commit()
+    db.refresh(session)
+
     return session
