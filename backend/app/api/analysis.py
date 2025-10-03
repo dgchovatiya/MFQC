@@ -8,6 +8,7 @@ from ..schemas.session import SessionResponse
 from ..services.pdf_parser import pdf_parser_service
 from ..services.ocr_service import ocr_service
 from ..services.excel_parser import excel_parser, bom_aggregator
+from ..services.normalizer import data_normalizer
 from ..logging_config import setup_logging
 from datetime import datetime
 
@@ -277,9 +278,73 @@ def run_validation_pipeline(session_id: str, db: Session):
             session.overall_result["bom_summary"] = bom_summary
         
         # =============================================================================
-        # PHASE 8: DATA NORMALIZATION - PLACEHOLDER
+        # PHASE 8: DATA NORMALIZATION
         # =============================================================================
-        logger.info("Phase 8: Data normalization (VGN-, INF- prefixes) - TODO")
+        logger.info("Phase 8: Data normalization - Starting...")
+        
+        normalized_data = {
+            "traveler": None,
+            "image": None,
+            "bom": None
+        }
+        
+        # Normalize Traveler data (from PDF)
+        if traveler_file and traveler_file.extracted_data:
+            normalized_data["traveler"] = data_normalizer.normalize_extracted_data(
+                traveler_file.extracted_data,
+                source="traveler"
+            )
+            logger.info(f"Phase 8: Normalized traveler data - "
+                       f"{len(normalized_data['traveler']['part_numbers'])} parts, "
+                       f"{len(normalized_data['traveler']['board_serials'])} boards")
+        
+        # Normalize Image data (from OCR)
+        if image_file and image_file.extracted_data:
+            normalized_data["image"] = data_normalizer.normalize_extracted_data(
+                image_file.extracted_data,
+                source="image"
+            )
+            logger.info(f"Phase 8: Normalized image data - "
+                       f"{len(normalized_data['image']['part_numbers'])} parts, "
+                       f"{len(normalized_data['image']['board_serials'])} boards")
+        
+        # Normalize BOM data (aggregate all BOMs)
+        if bom_aggregator.bom_data:
+            # Aggregate all BOM data into single structure
+            all_jobs = []
+            all_parts = []
+            
+            # Collect job numbers and parts from all BOMs
+            for bom in bom_aggregator.bom_data:
+                if "job_number" in bom and bom["job_number"]:
+                    all_jobs.append(bom["job_number"])
+                if "parts" in bom:
+                    all_parts.extend(bom["parts"])
+            
+            aggregated_bom = {
+                "job_numbers": all_jobs,  # List of job numbers to normalize
+                "parts": all_parts  # List of part dicts to normalize
+            }
+            
+            normalized_data["bom"] = data_normalizer.normalize_extracted_data(
+                aggregated_bom,
+                source="bom"
+            )
+            logger.info(f"Phase 8: Normalized BOM data - "
+                       f"{len(normalized_data['bom']['job_numbers'])} jobs, "
+                       f"{len(normalized_data['bom']['part_numbers'])} parts")
+        
+        # Log normalization summary
+        total_normalizations = 0
+        for source, data in normalized_data.items():
+            if data and data.get("normalization_applied"):
+                total_normalizations += len(data["normalization_applied"])
+        
+        logger.info(f"Phase 8: Data normalization complete - "
+                   f"{total_normalizations} normalizations applied")
+        
+        # Store normalized data for Phase 9 validation
+        session.overall_result["normalized_data"] = normalized_data
         
         # =============================================================================
         # PHASE 9: VALIDATION CHECKS - PLACEHOLDER
