@@ -2,13 +2,15 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from ..database import get_db
-from ..models.session import Session as SessionModel, SessionStatus
+from ..models.session import Session as SessionModel, SessionStatus, OverallResult as OverallResultEnum
 from ..models.file import UploadedFile, FileType, ProcessingStatus
+from ..models.result import ValidationResult as ValidationResultModel, CheckStatus
 from ..schemas.session import SessionResponse
 from ..services.pdf_parser import pdf_parser_service
 from ..services.ocr_service import ocr_service
 from ..services.excel_parser import excel_parser, bom_aggregator
 from ..services.normalizer import data_normalizer
+from ..services.validation_engine import validation_engine
 from ..logging_config import setup_logging
 from datetime import datetime
 
@@ -343,19 +345,63 @@ def run_validation_pipeline(session_id: str, db: Session):
         logger.info(f"Phase 8: Data normalization complete - "
                    f"{total_normalizations} normalizations applied")
         
-        # Store normalized data for Phase 9 validation
-        session.overall_result["normalized_data"] = normalized_data
+        # Normalized data is now ready for Phase 9 validation
         
         # =============================================================================
-        # PHASE 9: VALIDATION CHECKS - PLACEHOLDER
+        # PHASE 9: 7-CHECK VALIDATION ENGINE
         # =============================================================================
-        logger.info("Phase 9: 7-check validation engine - TODO")
+        logger.info("Phase 9: 7-check validation engine - Starting...")
+        
+        # Prepare files info for validation
+        files_info = {
+            "traveler_count": 1 if traveler_file else 0,
+            "image_count": 1 if image_file else 0,
+            "bom_count": len(bom_files) if bom_files else 0,
+            "source_data": {
+                "traveler": traveler_file.extracted_data if traveler_file else None,
+                "image": image_file.extracted_data if image_file else None
+            }
+        }
+        
+        # Run validation
+        validation_result = validation_engine.validate(normalized_data, files_info)
+        
+        # Store validation results in database
+        for check in validation_result.checks:
+            validation_record = ValidationResultModel(
+                session_id=session_id,
+                check_name=check.check_name,
+                check_priority=check.check_number,
+                status=CheckStatus[check.status.value],  # Convert to CheckStatus enum
+                message=check.message,
+                evidence=check.details if check.details else None
+            )
+            db.add(validation_record)
+        
+        # Set overall result (PASS/WARNING/FAIL enum)
+        session.overall_result = OverallResultEnum[validation_result.overall_status.value]
+        
+        # Log validation summary
+        logger.info(f"Phase 9: Validation complete - Overall: {validation_result.overall_status.value}")
+        for check in validation_result.checks:
+            status_icon = {
+                "PASS": "✓",
+                "WARNING": "⚠",
+                "FAIL": "✗",
+                "INFO": "ℹ"
+            }.get(check.status.value, "•")
+            logger.info(f"  {status_icon} Check {check.check_number}: {check.check_name} - {check.status.value}")
+            logger.info(f"    {check.message}")
+        
+        logger.info(f"Phase 9: Summary - "
+                   f"{validation_result.summary['checks_passed']} passed, "
+                   f"{validation_result.summary['checks_warning']} warnings, "
+                   f"{validation_result.summary['checks_failed']} failed")
         
         # =============================================================================
         # COMPLETE PIPELINE
         # =============================================================================
         session.status = SessionStatus.COMPLETED
-        session.overall_result = None  # Will be set by validation engine in Phase 9
         session.updated_at = datetime.utcnow()
         
         db.commit()
@@ -402,8 +448,8 @@ def reset_analysis_status(
     if not session:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
 
-    if session.status == SessionStatus.PROCESSING:
-        raise HTTPException(status_code=409, detail="Cannot reset while analysis is in progress")
+    # if session.status == SessionStatus.PROCESSING:
+    #     raise HTTPException(status_code=409, detail="Cannot reset while analysis is in progress")
 
     logger.info(f"Resetting analysis status for session {session_id}")
 
