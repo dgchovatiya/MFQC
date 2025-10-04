@@ -34,7 +34,11 @@ class ValidationResult(Base):
     status = Column(SQLEnum(CheckStatus), nullable=False)
     message = Column(Text, nullable=False)  # Human-readable result
     
-    # Evidence (JSON field)
+    # Expected vs Actual comparison
+    expected_value = Column(Text, nullable=True)  # What was expected
+    actual_value = Column(Text, nullable=True)     # What was actually found
+    
+    # Evidence (JSON field) - Additional metadata
     evidence = Column(JSON, nullable=True)
     # Example structure:
     # {

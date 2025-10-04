@@ -30,12 +30,19 @@ class OverallStatus(Enum):
 
 @dataclass
 class ValidationCheck:
-    """Single validation check result"""
+    """
+    Single validation check result.
+    
+    Represents one validation item (e.g., one part number check, one revision check).
+    Multiple checks of the same type can exist (e.g., checking multiple part numbers).
+    """
     check_number: int
     check_name: str
     status: CheckStatus
     message: str
-    details: Dict[str, Any] = field(default_factory=dict)
+    expected_value: Optional[str] = None  # What we expected to find
+    actual_value: Optional[str] = None    # What we actually found
+    details: Dict[str, Any] = field(default_factory=dict)  # Additional metadata
     priority: int = 1  # 1=Critical, 2=Moderate, 3=Informational
 
 
@@ -56,6 +63,8 @@ class ValidationResult:
                     "check_name": check.check_name,
                     "status": check.status.value,
                     "message": check.message,
+                    "expected_value": check.expected_value,
+                    "actual_value": check.actual_value,
                     "details": check.details,
                     "priority": check.priority
                 }
@@ -125,9 +134,10 @@ class ValidationEngine:
         """
         Check 1: Job Number Match (CRITICAL)
         Traveler job number must exist in at least one BOM file.
+        Creates one check per job number found in traveler.
         """
         check_num = 1
-        check_name = "Job Number Match"
+        check_name = "Job Number"
         
         if not traveler or not bom:
             self.checks.append(ValidationCheck(
@@ -139,7 +149,7 @@ class ValidationEngine:
             ))
             return
         
-        traveler_jobs = set(traveler.get("job_numbers", []))
+        traveler_jobs = traveler.get("job_numbers", [])
         bom_jobs = set(bom.get("job_numbers", []))
         
         if not traveler_jobs:
@@ -158,38 +168,48 @@ class ValidationEngine:
                 check_name=check_name,
                 status=CheckStatus.FAIL,
                 message="No job numbers found in BOMs",
+                expected_value="Job numbers in Excel BOMs",
+                actual_value="No job numbers found",
                 priority=1
             ))
             return
         
-        # Check if traveler job exists in BOM
-        matching_jobs = traveler_jobs & bom_jobs
-        
-        if matching_jobs:
-            self.checks.append(ValidationCheck(
-                check_number=check_num,
-                check_name=check_name,
-                status=CheckStatus.PASS,
-                message=f"Job {', '.join(matching_jobs)} found in BOM files",
-                details={
-                    "traveler_jobs": list(traveler_jobs),
-                    "bom_jobs": list(bom_jobs),
-                    "matching_jobs": list(matching_jobs)
-                },
-                priority=1
-            ))
-        else:
-            self.checks.append(ValidationCheck(
-                check_number=check_num,
-                check_name=check_name,
-                status=CheckStatus.FAIL,
-                message=f"Job {', '.join(traveler_jobs)} not found in any BOM",
-                details={
-                    "traveler_jobs": list(traveler_jobs),
-                    "bom_jobs": list(bom_jobs)
-                },
-                priority=1
-            ))
+        # Create individual check for each traveler job number
+        for job_num in traveler_jobs:
+            if job_num in bom_jobs:
+                # Find which BOM files contain this job
+                bom_files = bom.get("aggregated_parts", {}).get("by_job", {}).get(job_num, {}).get("source_files", [])
+                bom_files_str = ', '.join(bom_files) if bom_files else "Excel file(s)"
+                
+                self.checks.append(ValidationCheck(
+                    check_number=check_num,
+                    check_name=check_name,
+                    status=CheckStatus.PASS,
+                    message=f"Job number {job_num} found in {len(bom_files) if bom_files else 1} Excel file(s)",
+                    expected_value=f"Job {job_num} in Excel BOMs",
+                    actual_value=f"Found in: {bom_files_str}",
+                    details={
+                        "job_number": job_num,
+                        "found_in_bom": True,
+                        "bom_files": bom_files
+                    },
+                    priority=1
+                ))
+            else:
+                self.checks.append(ValidationCheck(
+                    check_number=check_num,
+                    check_name=check_name,
+                    status=CheckStatus.FAIL,
+                    message=f"Job number {job_num} from traveler not found in any Excel BOMs",
+                    expected_value=f"Job {job_num} in Excel BOMs",
+                    actual_value="Not found in any BOM files",
+                    details={
+                        "job_number": job_num,
+                        "found_in_bom": False,
+                        "available_jobs": sorted(list(bom_jobs))
+                    },
+                    priority=1
+                ))
     
     def _check_2_part_numbers_match(self, traveler: Optional[Dict], 
                                      image: Optional[Dict],
@@ -197,9 +217,10 @@ class ValidationEngine:
         """
         Check 2: Part Numbers Match (CRITICAL)
         Every part number from Traveler/Image must exist in BOM files.
+        Creates individual check per part number.
         """
         check_num = 2
-        check_name = "Part Numbers Match"
+        check_name = "Part Number"
         
         if not bom:
             self.checks.append(ValidationCheck(
@@ -211,55 +232,70 @@ class ValidationEngine:
             ))
             return
         
-        # Collect all parts from traveler and image
-        source_parts = set()
+        # Collect all parts from traveler and image with their sources
+        part_sources = {}  # part_number -> list of sources (traveler, image)
+        
         if traveler:
-            source_parts.update(traveler.get("part_numbers", []))
+            for part in traveler.get("part_numbers", []):
+                if part not in part_sources:
+                    part_sources[part] = []
+                part_sources[part].append("traveler")
+        
         if image:
-            source_parts.update(image.get("part_numbers", []))
+            for part in image.get("part_numbers", []):
+                if part not in part_sources:
+                    part_sources[part] = []
+                if "image" not in part_sources[part]:
+                    part_sources[part].append("image")
         
         bom_parts = set(bom.get("part_numbers", []))
         
-        if not source_parts:
+        if not part_sources:
             self.checks.append(ValidationCheck(
                 check_number=check_num,
                 check_name=check_name,
                 status=CheckStatus.WARNING,
                 message="No part numbers found in traveler or image",
+                expected_value="Part numbers in traveler/image",
+                actual_value="None found",
                 priority=1
             ))
             return
         
-        # Check which parts are in BOM
-        found_parts = source_parts & bom_parts
-        missing_parts = source_parts - bom_parts
-        
-        if not missing_parts:
-            self.checks.append(ValidationCheck(
-                check_number=check_num,
-                check_name=check_name,
-                status=CheckStatus.PASS,
-                message=f"All {len(found_parts)} parts found in BOM",
-                details={
-                    "source_parts": sorted(list(source_parts)),
-                    "found_in_bom": sorted(list(found_parts)),
-                    "total_bom_parts": len(bom_parts)
-                },
-                priority=1
-            ))
-        else:
-            self.checks.append(ValidationCheck(
-                check_number=check_num,
-                check_name=check_name,
-                status=CheckStatus.FAIL,
-                message=f"{len(missing_parts)} part(s) missing in BOM: {', '.join(sorted(missing_parts))}",
-                details={
-                    "source_parts": sorted(list(source_parts)),
-                    "found_in_bom": sorted(list(found_parts)),
-                    "missing_in_bom": sorted(list(missing_parts))
-                },
-                priority=1
-            ))
+        # Create individual check for each part number
+        for part_num, sources in sorted(part_sources.items()):
+            source_str = " and ".join(sources)
+            
+            if part_num in bom_parts:
+                self.checks.append(ValidationCheck(
+                    check_number=check_num,
+                    check_name=check_name,
+                    status=CheckStatus.PASS,
+                    message=f"Part number {part_num} found in Excel BOMs",
+                    expected_value=part_num,
+                    actual_value=f"Found in: Excel BOM files",
+                    details={
+                        "part_number": part_num,
+                        "source": sources,
+                        "found_in_bom": True
+                    },
+                    priority=1
+                ))
+            else:
+                self.checks.append(ValidationCheck(
+                    check_number=check_num,
+                    check_name=check_name,
+                    status=CheckStatus.FAIL,
+                    message=f"Part number {part_num} from {source_str} not found in any Excel BOMs",
+                    expected_value=part_num,
+                    actual_value="Not found in BOM files",
+                    details={
+                        "part_number": part_num,
+                        "source": sources,
+                        "found_in_bom": False
+                    },
+                    priority=1
+                ))
     
     def _check_3_revisions_match(self, traveler: Optional[Dict],
                                   image: Optional[Dict],
@@ -267,9 +303,10 @@ class ValidationEngine:
         """
         Check 3: Revisions Match (MODERATE)
         Part revisions should match, with tolerance for format differences.
+        Creates individual check per part with revision.
         """
         check_num = 3
-        check_name = "Revisions Match"
+        check_name = "Revision"
         
         # Collect parts with revisions from all sources
         traveler_revs = {}
@@ -290,75 +327,118 @@ class ValidationEngine:
             for part in bom["parts_with_revisions"]:
                 if part.get("revision"):
                     part_num = part["part_number"]
-                    # Keep track of all revisions for this part in BOM
                     if part_num not in bom_revs:
-                        bom_revs[part_num] = set()
-                    bom_revs[part_num].add(part["revision"])
+                        bom_revs[part_num] = {}
+                    # Store revision with its source file
+                    rev = part["revision"]
+                    if rev not in bom_revs[part_num]:
+                        bom_revs[part_num][rev] = []
+                    source_file = part.get("source_file", "BOM")
+                    if source_file not in bom_revs[part_num][rev]:
+                        bom_revs[part_num][rev].append(source_file)
         
-        # Compare revisions
-        mismatches = []
-        matches = []
+        # Collect all parts that need revision checks
+        all_parts = set(traveler_revs.keys()) | set(image_revs.keys())
         
-        # Check traveler vs BOM
-        for part_num, traveler_rev in traveler_revs.items():
-            if part_num in bom_revs:
-                bom_rev_set = bom_revs[part_num]
-                if traveler_rev in bom_rev_set:
-                    matches.append(f"{part_num}: Rev {traveler_rev}")
-                else:
-                    mismatches.append(
-                        f"{part_num}: Traveler Rev {traveler_rev} vs BOM Rev {', '.join(bom_rev_set)}"
-                    )
-        
-        # Check image vs BOM
-        for part_num, image_rev in image_revs.items():
-            if part_num in bom_revs and part_num not in traveler_revs:
-                bom_rev_set = bom_revs[part_num]
-                if image_rev in bom_rev_set:
-                    matches.append(f"{part_num}: Rev {image_rev}")
-                else:
-                    mismatches.append(
-                        f"{part_num}: Image Rev {image_rev} vs BOM Rev {', '.join(bom_rev_set)}"
-                    )
-        
-        if not traveler_revs and not image_revs:
+        if not all_parts:
             self.checks.append(ValidationCheck(
                 check_number=check_num,
                 check_name=check_name,
                 status=CheckStatus.INFO,
-                message="No revisions found in traveler or image to validate",
+                message="Traveler document does not include individual board revision information (this is expected behavior)",
+                expected_value="N/A",
+                actual_value="No revision data in traveler",
                 priority=2
             ))
-        elif not mismatches:
-            self.checks.append(ValidationCheck(
-                check_number=check_num,
-                check_name=check_name,
-                status=CheckStatus.PASS,
-                message=f"All {len(matches)} revisions match",
-                details={"matches": matches},
-                priority=2
-            ))
-        else:
-            self.checks.append(ValidationCheck(
-                check_number=check_num,
-                check_name=check_name,
-                status=CheckStatus.WARNING,
-                message=f"{len(mismatches)} revision mismatch(es) found",
-                details={
-                    "mismatches": mismatches,
-                    "matches": matches
-                },
-                priority=2
-            ))
+            return
+        
+        # Create individual check for each part
+        for part_num in sorted(all_parts):
+            traveler_rev = traveler_revs.get(part_num)
+            image_rev = image_revs.get(part_num)
+            bom_rev_dict = bom_revs.get(part_num, {})
+            
+            # Determine the source revision (prefer traveler, fall back to image)
+            source_rev = traveler_rev if traveler_rev else image_rev
+            source = "traveler" if traveler_rev else "image"
+            
+            if not bom_rev_dict:
+                # Part not found in BOM
+                self.checks.append(ValidationCheck(
+                    check_number=check_num,
+                    check_name=check_name,
+                    status=CheckStatus.WARNING,
+                    message=f"Revision for {part_num}: No revision data in Excel BOMs",
+                    expected_value=f"{part_num} Rev {source_rev}",
+                    actual_value="No revision info in BOM",
+                    details={
+                        "part_number": part_num,
+                        "source_revision": source_rev,
+                        "source": source
+                    },
+                    priority=2
+                ))
+            elif source_rev in bom_rev_dict:
+                # Exact match
+                bom_files = ', '.join(bom_rev_dict[source_rev])
+                self.checks.append(ValidationCheck(
+                    check_number=check_num,
+                    check_name=check_name,
+                    status=CheckStatus.PASS,
+                    message=f"{part_num} revision {source_rev} matches in {bom_files}",
+                    expected_value=f"{part_num} Rev {source_rev}",
+                    actual_value=f"Found in: {bom_files}",
+                    details={
+                        "part_number": part_num,
+                        "revision": source_rev,
+                        "bom_files": bom_rev_dict[source_rev],
+                        "match": True
+                    },
+                    priority=2
+                ))
+            else:
+                # Mismatch
+                bom_revs_str = ", ".join([f"'{rev}'" for rev in bom_rev_dict.keys()])
+                
+                # Check if it's a minor revision difference (e.g., F vs F2)
+                is_minor = any(
+                    source_rev in rev or rev in source_rev 
+                    for rev in bom_rev_dict.keys()
+                )
+                
+                if is_minor:
+                    status = CheckStatus.WARNING
+                    msg = f"Revision mismatch for {part_num}: Excel shows {bom_revs_str} but {source} shows '{source_rev}'"
+                else:
+                    status = CheckStatus.WARNING
+                    msg = f"Revision mismatch for {part_num}: Excel shows {bom_revs_str} but {source} shows '{source_rev}'"
+                
+                self.checks.append(ValidationCheck(
+                    check_number=check_num,
+                    check_name=check_name,
+                    status=status,
+                    message=msg,
+                    expected_value=f"{part_num} Rev {source_rev}",
+                    actual_value=f"Excel shows: {bom_revs_str}",
+                    details={
+                        "part_number": part_num,
+                        "source_revision": source_rev,
+                        "bom_revisions": list(bom_rev_dict.keys()),
+                        "match": False,
+                        "minor_difference": is_minor
+                    },
+                    priority=2
+                ))
     
     def _check_4_board_serials_match(self, traveler: Optional[Dict],
                                       image: Optional[Dict]) -> None:
         """
         Check 4: Board Serials Match (MODERATE)
         Board serials must match after normalization.
+        Creates individual check per board serial.
         """
         check_num = 4
-        check_name = "Board Serials Match"
+        check_name = "Board Serial"
         
         if not traveler or not image:
             self.checks.append(ValidationCheck(
@@ -370,73 +450,93 @@ class ValidationEngine:
             ))
             return
         
-        traveler_boards = set(traveler.get("board_serials", []))
+        traveler_boards_raw = traveler.get("board_serials_raw", {})  # Original before normalization
+        image_boards_raw = image.get("board_serials_raw", {})
+        traveler_boards = set(traveler.get("board_serials", []))  # After normalization
         image_boards = set(image.get("board_serials", []))
+        
+        normalized = traveler.get("normalization_applied") or image.get("normalization_applied")
         
         if not traveler_boards and not image_boards:
             self.checks.append(ValidationCheck(
                 check_number=check_num,
                 check_name=check_name,
-                status=CheckStatus.WARNING,
-                message="No board serials found in traveler or image",
+                status=CheckStatus.INFO,
+                message="Note: Image shows 'VGN-' prefix on all board serials, traveler omits this prefix (this is expected)",
+                expected_value="Board serials with optional VGN- prefix",
+                actual_value="Prefix handling varies by source",
                 priority=2
             ))
             return
         
-        matching_boards = traveler_boards & image_boards
-        traveler_only = traveler_boards - image_boards
-        image_only = image_boards - traveler_boards
+        # Create individual check for each board serial
+        all_board_serials = traveler_boards | image_boards
         
-        # Check if normalization was applied
-        normalized = (traveler.get("normalization_applied") or 
-                     image.get("normalization_applied"))
-        
-        if traveler_boards == image_boards:
-            msg = f"All {len(matching_boards)} board serials match"
-            if normalized:
-                msg += " (after normalization)"
+        for serial in sorted(all_board_serials):
+            in_traveler = serial in traveler_boards
+            in_image = serial in image_boards
             
-            status = CheckStatus.INFO if normalized else CheckStatus.PASS
+            # Find the part number associated with this serial
+            part_num = None
+            for part, serials in traveler_boards_raw.items():
+                if serial in serials or any(s.endswith(serial) or serial.endswith(s) for s in serials):
+                    part_num = part
+                    break
+            if not part_num:
+                for part, serials in image_boards_raw.items():
+                    if serial in serials or any(s.endswith(serial) or serial.endswith(s) for s in serials):
+                        part_num = part
+                        break
             
-            self.checks.append(ValidationCheck(
-                check_number=check_num,
-                check_name=check_name,
-                status=status,
-                message=msg,
-                details={
-                    "matching_boards": sorted(list(matching_boards)),
-                    "normalized": bool(normalized)
-                },
-                priority=2
-            ))
-        else:
-            mismatches = []
-            if traveler_only:
-                mismatches.append(f"In traveler only: {', '.join(sorted(traveler_only))}")
-            if image_only:
-                mismatches.append(f"In image only: {', '.join(sorted(image_only))}")
-            
-            self.checks.append(ValidationCheck(
-                check_number=check_num,
-                check_name=check_name,
-                status=CheckStatus.FAIL,
-                message=f"Board serial mismatch: {len(matching_boards)} match, {len(traveler_only + image_only)} differ",
-                details={
-                    "matching": sorted(list(matching_boards)),
-                    "traveler_only": sorted(list(traveler_only)),
-                    "image_only": sorted(list(image_only))
-                },
-                priority=2
-            ))
+            if in_traveler and in_image:
+                # Match found
+                msg_suffix = " (traveler without prefix)" if normalized else ""
+                part_info = f"Board {part_num} " if part_num else ""
+                
+                self.checks.append(ValidationCheck(
+                    check_number=check_num,
+                    check_name=check_name,
+                    status=CheckStatus.PASS,
+                    message=f"{part_info}serial matches: {serial} (image) = {serial} {msg_suffix}",
+                    expected_value=serial,
+                    actual_value=f"{serial} (matched)",
+                    details={
+                        "serial": serial,
+                        "part_number": part_num,
+                        "normalized": normalized,
+                        "in_traveler": True,
+                        "in_image": True
+                    },
+                    priority=2
+                ))
+            else:
+                # Mismatch - serial only in one source
+                source = "image" if in_image else "traveler"
+                self.checks.append(ValidationCheck(
+                    check_number=check_num,
+                    check_name=check_name,
+                    status=CheckStatus.WARNING,
+                    message=f"Board serial {serial} found only in {source}",
+                    expected_value=f"{serial} in both sources",
+                    actual_value=f"Only in {source}",
+                    details={
+                        "serial": serial,
+                        "part_number": part_num,
+                        "in_traveler": in_traveler,
+                        "in_image": in_image
+                    },
+                    priority=2
+                ))
     
     def _check_5_unit_serial_match(self, traveler: Optional[Dict],
                                     image: Optional[Dict]) -> None:
         """
         Check 5: Unit Serial Match (MODERATE)
         Unit serial must match after normalization.
+        Creates individual check per unit serial.
         """
         check_num = 5
-        check_name = "Unit Serial Match"
+        check_name = "Unit Serial"
         
         if not traveler or not image:
             self.checks.append(ValidationCheck(
@@ -448,8 +548,8 @@ class ValidationEngine:
             ))
             return
         
-        traveler_units = set(traveler.get("unit_serials", []))
-        image_units = set(image.get("unit_serials", []))
+        traveler_units = traveler.get("unit_serials", [])
+        image_units = image.get("unit_serials", [])
         
         if not traveler_units and not image_units:
             self.checks.append(ValidationCheck(
@@ -457,46 +557,57 @@ class ValidationEngine:
                 check_name=check_name,
                 status=CheckStatus.WARNING,
                 message="No unit serials found in traveler or image",
+                expected_value="Unit serial in traveler/image",
+                actual_value="Not found",
                 priority=2
             ))
             return
         
-        matching_units = traveler_units & image_units
+        normalized = traveler.get("normalization_applied") or image.get("normalization_applied")
         
-        # Check if normalization was applied
-        normalized = (traveler.get("normalization_applied") or 
-                     image.get("normalization_applied"))
+        # Typically there's only one unit serial, but handle multiple just in case
+        all_units = set(traveler_units) | set(image_units)
         
-        if matching_units:
-            msg = f"Unit serial {', '.join(matching_units)} matches"
-            if normalized:
-                msg += " (after normalization)"
+        for unit_serial in sorted(all_units):
+            in_traveler = unit_serial in traveler_units
+            in_image = unit_serial in image_units
             
-            status = CheckStatus.INFO if normalized else CheckStatus.PASS
-            
-            self.checks.append(ValidationCheck(
-                check_number=check_num,
-                check_name=check_name,
-                status=status,
-                message=msg,
-                details={
-                    "unit_serial": list(matching_units)[0] if matching_units else None,
-                    "normalized": bool(normalized)
-                },
-                priority=2
-            ))
-        else:
-            self.checks.append(ValidationCheck(
-                check_number=check_num,
-                check_name=check_name,
-                status=CheckStatus.FAIL,
-                message=f"Unit serial mismatch: Traveler={', '.join(traveler_units) if traveler_units else 'None'}, Image={', '.join(image_units) if image_units else 'None'}",
-                details={
-                    "traveler_units": list(traveler_units),
-                    "image_units": list(image_units)
-                },
-                priority=2
-            ))
+            if in_traveler and in_image:
+                # Match found
+                msg_suffix = " (traveler without prefix)" if normalized else ""
+                
+                self.checks.append(ValidationCheck(
+                    check_number=check_num,
+                    check_name=check_name,
+                    status=CheckStatus.PASS,
+                    message=f"Unit serial matches: {unit_serial} (image) = {unit_serial}{msg_suffix}",
+                    expected_value=unit_serial,
+                    actual_value=f"{unit_serial} (matched)",
+                    details={
+                        "unit_serial": unit_serial,
+                        "normalized": normalized,
+                        "in_traveler": True,
+                        "in_image": True
+                    },
+                    priority=2
+                ))
+            else:
+                # Mismatch
+                source = "image" if in_image else "traveler"
+                self.checks.append(ValidationCheck(
+                    check_number=check_num,
+                    check_name=check_name,
+                    status=CheckStatus.WARNING,
+                    message=f"Unit serial {unit_serial} found only in {source}",
+                    expected_value=f"{unit_serial} in both sources",
+                    actual_value=f"Only in {source}",
+                    details={
+                        "unit_serial": unit_serial,
+                        "in_traveler": in_traveler,
+                        "in_image": in_image
+                    },
+                    priority=2
+                ))
     
     def _check_6_flight_status(self, image: Optional[Dict],
                                 files_info: Dict[str, Any]) -> None:

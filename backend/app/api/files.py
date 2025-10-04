@@ -1,5 +1,5 @@
 # app/api/files.py
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from sqlalchemy.orm import Session
 from typing import List
 import os
@@ -7,7 +7,7 @@ import shutil
 from ..database import get_db
 from ..models.session import Session as SessionModel, SessionStatus
 from ..models.file import UploadedFile, FileType, ProcessingStatus
-from ..schemas.file import FileResponse
+from ..schemas.file import FileResponse, FileBasicResponse
 from ..config import settings
 from ..utils.file_handlers import validate_file_type, save_upload_file
 
@@ -182,13 +182,92 @@ async def upload_file(
     
     return uploaded_file
 
-@router.get("/{session_id}/files", response_model=List[FileResponse])
+@router.get("/{session_id}/files",
+            summary="List Uploaded Files",
+            description="""
+            Retrieve all uploaded files for a specific session.
+            
+            **Performance Optimization**:
+            - By default, returns lightweight file metadata without extracted data
+            - Use `include_extracted_data=true` to include full extraction results
+            
+            **Use Cases**:
+            - **File Tracking** (default): Quick list of uploaded files with status
+            - **Full Details** (include_extracted_data=true): Complete file info including OCR/parsed data
+            
+            **Query Parameters**:
+            - `include_extracted_data`: Boolean flag to include extracted_data field (default: false)
+            
+            **Extracted Data Examples**:
+            ```json
+            {
+                "job_number": "82334",
+                "unit_serial": "1619", 
+                "board_serials": ["80751-0053", "80641-0012"],
+                "part_numbers": ["PCA-1153-03", "PCA-1154-01"]
+            }
+            ```
+            """,
+            responses={
+                200: {
+                    "description": "List of files for the session",
+                    "content": {
+                        "application/json": {
+                            "examples": {
+                                "basic": {
+                                    "summary": "Basic file list (default)",
+                                    "value": [
+                                        {
+                                            "id": "file-uuid-1",
+                                            "session_id": "session-uuid",
+                                            "filename": "traveler.pdf",
+                                            "file_type": "traveler",
+                                            "file_size": 2048576,
+                                            "processing_status": "completed",
+                                            "uploaded_at": "2025-10-04T10:30:00Z",
+                                            "processed_at": "2025-10-04T10:31:00Z"
+                                        }
+                                    ]
+                                },
+                                "with_extracted_data": {
+                                    "summary": "With extracted data (include_extracted_data=true)",
+                                    "value": [
+                                        {
+                                            "id": "file-uuid-1",
+                                            "session_id": "session-uuid",
+                                            "filename": "traveler.pdf",
+                                            "file_type": "traveler",
+                                            "file_size": 2048576,
+                                            "processing_status": "completed",
+                                            "uploaded_at": "2025-10-04T10:30:00Z",
+                                            "processed_at": "2025-10-04T10:31:00Z",
+                                            "extracted_data": {
+                                                "job_number": "82334",
+                                                "unit_serial": "1619",
+                                                "board_serials": ["80751-0053"]
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                },
+                404: {"description": "Session not found"}
+            })
 def list_files(
     session_id: str,
+    include_extracted_data: bool = Query(
+        False,
+        description="Include extracted_data field in response (performance impact for large datasets)"
+    ),
     db: Session = Depends(get_db)
 ):
     """
-    List all files for a session
+    List all uploaded files for a session with optional extracted data.
+    
+    Returns lightweight file metadata by default for better performance.
+    Set include_extracted_data=true to get full extraction results.
     """
     # Check session exists
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
@@ -198,7 +277,11 @@ def list_files(
     # Get files
     files = db.query(UploadedFile).filter(UploadedFile.session_id == session_id).all()
     
-    return files
+    # Return appropriate response based on query parameter
+    if include_extracted_data:
+        return [FileResponse.from_orm(file) for file in files]
+    else:
+        return [FileBasicResponse.from_orm(file) for file in files]
 
 @router.delete("/{session_id}/files/{file_id}", 
                status_code=204,

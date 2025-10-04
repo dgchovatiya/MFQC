@@ -396,17 +396,38 @@ async def run_validation_pipeline(session_id: str, db: Session):
         # Run validation
         validation_result = validation_engine.validate(normalized_data, files_info)
         
-        # Store validation results in database
-        for check in validation_result.checks:
+        # Store validation results in database AND broadcast each check via WebSocket
+        for idx, check in enumerate(validation_result.checks):
             validation_record = ValidationResultModel(
                 session_id=session_id,
                 check_name=check.check_name,
                 check_priority=check.check_number,
                 status=CheckStatus[check.status.value],  # Convert to CheckStatus enum
                 message=check.message,
+                expected_value=check.expected_value,
+                actual_value=check.actual_value,
                 evidence=check.details if check.details else None
             )
             db.add(validation_record)
+            
+            # Broadcast each individual check result via WebSocket in real-time
+            check_progress = 85 + int((idx / len(validation_result.checks)) * 14)  # 85-99%
+            await broadcast_progress(
+                session_id,
+                "Phase 9: Validation",
+                f"Check {check.check_number}: {check.check_name} - {check.status.value}",
+                check_progress,
+                "processing",
+                {
+                    "check_number": check.check_number,
+                    "check_name": check.check_name,
+                    "check_status": check.status.value,
+                    "check_message": check.message,
+                    "expected_value": check.expected_value,
+                    "actual_value": check.actual_value,
+                    "check_details": check.details
+                }
+            )
         
         # Set overall result (PASS/WARNING/FAIL enum)
         session.overall_result = OverallResultEnum[validation_result.overall_status.value]

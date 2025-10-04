@@ -12,6 +12,8 @@ class ResultResponse(BaseModel):
     check_priority: int
     status: CheckStatus
     message: str
+    expected_value: Optional[str] = None
+    actual_value: Optional[str] = None
     evidence: Optional[Dict[str, Any]] = None
     created_at: datetime
     
