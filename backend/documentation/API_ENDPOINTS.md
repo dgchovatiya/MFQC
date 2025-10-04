@@ -2,18 +2,68 @@
 
 ## Overview
 
-The Manufacturing QC Cross-Check System provides REST API endpoints for automating quality control validation of manufacturing documentation. The system processes Traveler PDFs, Product Images, and Excel BOMs to perform comprehensive cross-validation.
+The Manufacturing QC Cross-Check System provides a comprehensive REST API with WebSocket support for automating quality control validation of manufacturing documentation. The system intelligently processes three types of input files:
+
+- **Traveler PDFs**: Work instructions containing job numbers, part numbers, and serial numbers
+- **Product Images**: PCB/hardware photos processed with advanced OCR
+- **Excel BOMs**: Bill of Materials spreadsheets with part and revision data
+
+The API performs intelligent data extraction, normalization, and cross-validation across all sources, returning detailed Pass/Warning/Fail results with evidence.
 
 ## Base URL
 
 ```
-Local Development: http://localhost:8000
-Production: [To be deployed]
+Development: http://localhost:8000
+Production: https://your-domain.com (when deployed)
 ```
 
 ## Authentication
 
-Currently no authentication required (single-user system).
+Currently operates as a single-user system with no authentication required. 
+
+**Future Enhancement**: API key or JWT-based authentication for multi-user deployments.
+
+## API Versioning
+
+Current Version: **v1.0**
+
+All endpoints are prefixed with `/api` for clarity and future versioning support.
+
+## Rate Limiting
+
+Currently no rate limiting is enforced. The system is designed for internal manufacturing use with moderate request volumes.
+
+**Future Enhancement**: Rate limiting for public-facing deployments (e.g., 100 requests/minute per session).
+
+## Response Format
+
+All API responses follow a consistent JSON structure:
+
+**Success Response:**
+```json
+{
+  "id": "uuid",
+  "field1": "value1",
+  "field2": "value2"
+}
+```
+
+**Error Response:**
+```json
+{
+  "detail": "Error message describing what went wrong"
+}
+```
+
+**List Response:**
+```json
+{
+  "items": [...],
+  "total": 100,
+  "skip": 0,
+  "limit": 20
+}
+```
 
 ---
 
@@ -459,7 +509,7 @@ Retrieve all validation results for a completed session.
 
 **WebSocket** `ws://localhost:8000/api/ws/{session_id}/progress`
 
-Connect to receive real-time progress updates during validation pipeline execution.
+Connect to receive real-time progress updates during validation analysis.
 
 **Path Parameters:**
 
@@ -469,40 +519,107 @@ Connect to receive real-time progress updates during validation pipeline executi
 
 - Automatically sends current progress upon connection
 - Streams live updates as analysis progresses
-- Supports multiple clients per session
-- Gracefully handles disconnections
+- Supports multiple clients per session (e.g., multiple browser tabs)
+- Gracefully handles disconnections and reconnections
+- Connection persists until analysis completes
 
 **Message Format:**
-All progress messages follow this structure:
+
+All WebSocket messages follow this JSON structure:
 
 ```json
 {
   "session_id": "123e4567-e89b-12d3-a456-426614174000",
-  "phase": "Phase 6: Image OCR",
-  "message": "Processing white labels...",
+  "phase": "Image OCR Processing",
+  "message": "Extracting text from white labels...",
   "progress": 45,
   "status": "processing",
   "timestamp": "2025-10-04T12:34:56.789Z",
-  "details": {}
+  "details": {
+    "check_number": 2,
+    "check_name": "Part Number",
+    "check_status": "PASS",
+    "check_message": "Part number PCA-1153-03 found in Excel BOMs",
+    "expected_value": "PCA-1153-03",
+    "actual_value": "Found in: Excel BOM files"
+  }
 }
 ```
 
 **Message Fields:**
 
-- `session_id` (string): Session being processed
-- `phase` (string): Current pipeline phase name
-- `message` (string): Human-readable status message
-- `progress` (number, 0-100): Overall completion percentage
-- `status` (string): Current status - see values below
-- `timestamp` (string, ISO 8601): Message timestamp
-- `details` (object): Additional phase-specific information
+| Field | Type | Description |
+|-------|------|-------------|
+| `session_id` | string | Session UUID being processed |
+| `phase` | string | Current processing stage (e.g., "PDF Parsing", "Image OCR", "Validation") |
+| `message` | string | Human-readable status message |
+| `progress` | number (0-100) | Overall completion percentage |
+| `status` | string | Current status (see below) |
+| `timestamp` | string (ISO 8601) | Message timestamp |
+| `details` | object | Additional context (validation checks, file counts, etc.) |
 
 **Status Values:**
 
-- `connected`: WebSocket connection established
-- `processing`: Analysis in progress
-- `completed`: Analysis finished successfully
-- `failed`: Analysis encountered errors
+| Status | Description |
+|--------|-------------|
+| `connected` | WebSocket connection established |
+| `processing` | Analysis in progress |
+| `completed` | Analysis finished successfully |
+| `failed` | Analysis encountered errors |
+
+**Details Object (Validation Checks):**
+
+When validation checks are running, the `details` object contains:
+
+```json
+{
+  "check_number": 2,
+  "check_name": "Part Number",
+  "check_status": "PASS",
+  "check_message": "Part number PCA-1153-03 found in Excel BOMs",
+  "expected_value": "PCA-1153-03",
+  "actual_value": "Found in: Excel BOM files",
+  "check_details": {
+    "part_number": "PCA-1153-03",
+    "source": ["traveler", "image"],
+    "found_in_bom": true
+  }
+}
+```
+
+**Example Usage (JavaScript):**
+
+```javascript
+const ws = new WebSocket('ws://localhost:8000/api/ws/session-uuid/progress');
+
+ws.onopen = () => {
+  console.log('Connected to analysis progress stream');
+};
+
+ws.onmessage = (event) => {
+  const update = JSON.parse(event.data);
+  console.log(`Progress: ${update.progress}% - ${update.message}`);
+  
+  // Handle validation check updates
+  if (update.details?.check_name) {
+    console.log(`Check: ${update.details.check_name} - ${update.details.check_status}`);
+  }
+  
+  // Handle completion
+  if (update.status === 'completed') {
+    console.log('Analysis complete!');
+    ws.close();
+  }
+};
+
+ws.onerror = (error) => {
+  console.error('WebSocket error:', error);
+};
+
+ws.onclose = () => {
+  console.log('WebSocket connection closed');
+};
+```
 
 
 ## 🔧 System API
