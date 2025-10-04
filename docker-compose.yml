@@ -13,16 +13,15 @@ services:
       - ./backend/logs:/app/logs
     container_name: mf_qc_backend
 
-  # Frontend service will be added here in the future
-  # frontend:
-  #   build:
-  #     context: ./frontend
-  #     dockerfile: Dockerfile
-  #   ports:
-  #     - "3000:3000"
-  #   depends_on:
-  #     - backend
-  #   container_name: mf_qc_frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    container_name: mf_qc_frontend
 
 networks:
   default:
