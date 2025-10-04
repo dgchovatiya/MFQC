@@ -43,6 +43,7 @@ class ExtractionResult:
     board_serials: List[str] = field(default_factory=list)
     part_numbers: List[str] = field(default_factory=list)
     revisions: List[str] = field(default_factory=list)
+    parts_with_revisions: List[Dict[str, str]] = field(default_factory=list)
     model: Optional[str] = None
     voltage: Optional[str] = None
     date_code: Optional[str] = None
@@ -79,12 +80,12 @@ class HardwareImageExtractor:
         
         # Step 6: White label detection and OCR
         logger.info("[OCR] Detecting and processing white labels...")
-        label_boards, label_parts, label_revisions, label_texts = self._process_white_labels(img_bgr, gray, lid_bbox)
+        label_boards, label_parts_with_revs, label_revisions, label_texts = self._process_white_labels(img_bgr, gray, lid_bbox)
         
         # Step 7: Parse and extract structured data
         logger.info("[OCR] Extracting structured data...")
         combined_text = "\n".join([full_text] + pcb_texts + label_texts)
-        result = self._parse_all(lid_text, combined_text, label_boards, label_parts, label_revisions)
+        result = self._parse_all(lid_text, combined_text, label_boards, label_parts_with_revs, label_revisions)
         
         # Validations
         result.validations["flight_status_ok"] = result.flight_status in {"FLIGHT", "EDU - NOT FOR FLIGHT"}
@@ -178,8 +179,8 @@ class HardwareImageExtractor:
         return results
     
     def _process_white_labels(self, img_bgr: np.ndarray, gray: np.ndarray, 
-                             lid_bbox: Tuple[int, int, int, int]) -> Tuple[List[str], List[str], List[str], List[str]]:
-        """Enhanced white label detection and OCR - returns (boards, parts, revisions, texts)"""
+                             lid_bbox: Tuple[int, int, int, int]) -> Tuple[List[str], List[Dict[str, str]], List[str], List[str]]:
+        """Enhanced white label detection and OCR - returns (boards, parts_with_revs, revisions, texts)"""
         h, w = gray.shape
         xL0, yL0, xL1, yL1 = lid_bbox
         
@@ -187,7 +188,7 @@ class HardwareImageExtractor:
         labels = self._detect_white_labels(img_bgr, (xL0, yL0, xL1, yL1))
         
         all_boards = []
-        all_parts = []
+        all_parts_with_revs = []
         all_texts = []
         all_revisions = []
         
@@ -207,14 +208,22 @@ class HardwareImageExtractor:
             if text:
                 all_texts.append(text)
                 
-                # Extract boards, parts, and revisions
+                # Extract boards, parts, and revisions from THIS label
                 boards, parts, revs = self._extract_from_text(text)
                 all_boards.extend(boards)
-                all_parts.extend(parts)
                 all_revisions.extend(revs)
+                
+                # Associate revisions with parts from the same label
+                for part in parts:
+                    # If this label has a revision, associate it with the part
+                    revision = revs[0] if revs else None  # Use first revision if multiple (rare)
+                    all_parts_with_revs.append({
+                        "part_number": part,
+                        "revision": revision
+                    })
         
         logger.info("[OCR] Found %d white labels with identifiers", len(all_texts))
-        return all_boards, all_parts, all_revisions, all_texts
+        return all_boards, all_parts_with_revs, all_revisions, all_texts
     
     def _detect_white_labels(self, img_bgr: np.ndarray, 
                              lid_bbox: Tuple[int, int, int, int]) -> List[Tuple[int, int, int, int]]:
@@ -414,7 +423,7 @@ class HardwareImageExtractor:
                  .replace("Z", "2"))
     
     def _parse_all(self, lid_text: str, combined_text: str,
-                   label_boards: List[str], label_parts: List[str], 
+                   label_boards: List[str], label_parts_with_revs: List[Dict[str, str]], 
                    label_revisions: List[str]) -> ExtractionResult:
         """Parse all extracted text"""
         lid_up = lid_text.upper()
@@ -442,18 +451,22 @@ class HardwareImageExtractor:
         date = RE_DATE.search(combined_up)
         result.date_code = date.group(0) if date else None
         
-        # Extract boards, parts, and revisions from all text
+        # Extract boards, parts, and revisions from all text (non-label regions)
         all_boards, all_parts, all_revisions = self._extract_from_text(combined_text)
         
         # Combine with label results
         all_boards.extend(label_boards)
-        all_parts.extend(label_parts)
+        # Extract just the part numbers from label_parts_with_revs for display
+        all_parts.extend([p["part_number"] for p in label_parts_with_revs])
         all_revisions.extend(label_revisions)
         
         # Deduplicate
         result.board_serials = list(dict.fromkeys(all_boards))
         result.part_numbers = list(dict.fromkeys(all_parts))
         result.revisions = list(dict.fromkeys(all_revisions))
+        
+        # Store structured parts with revisions for later use
+        result.parts_with_revisions = label_parts_with_revs
         
         # Print formatted extraction summary
         logger.info("\n" + "=" * 80)
@@ -497,9 +510,11 @@ class ProductImageOCR:
         
         extraction = self.extractor.analyze(image_path)
         
+        # Use the structured parts_with_revisions from labels
+        # This maintains the proper part-revision association from each white label
         result: Dict[str, Any] = {
             "board_serials": extraction.board_serials,
-            "part_numbers": [{"part_number": pn, "revision": pn[-2:]} for pn in extraction.part_numbers],
+            "part_numbers": extraction.parts_with_revisions,  # Already structured with revisions
             "unit_serial": extraction.unit_serial,
             "flight_status": extraction.flight_status,
             "raw_text": extraction.raw_text_all,
